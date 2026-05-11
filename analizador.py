@@ -9,17 +9,11 @@
 
 INSTALACIÓN (ejecutar una sola vez en el terminal):
 
-    pip install streamlit pandas numpy plotly yfinance
+    pip install streamlit pandas numpy plotly
 
 EJECUCIÓN:
 
     streamlit run analizador.py
-
-NOTAS:
-  · Se intenta descargar datos reales de Yahoo Finance.
-  · Si no hay datos suficientes, se usan datos sintéticos
-    calibrados con las rentabilidades anuales reales del fondo.
-  · Los datos sintéticos son reproducibles (semilla fija=2004).
 """
 
 import warnings
@@ -30,6 +24,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime
+from pathlib import Path
 from pandas.tseries.offsets import MonthEnd
 
 # ─────────────────────────────────────────────────────────────────
@@ -55,29 +50,6 @@ C_ROJO       = "#E84855"  # rojo (valores negativos, línea objetivo)
 C_FONDO      = "#0d0d0d"
 C_TARJETA    = "#161616"
 C_BORDE      = "#242424"
-
-# Rentabilidades anuales reales del fondo (2004 – mar-2026)
-RETORNOS_ANUALES = {
-    2004:  0.0897, 2005:  0.1780, 2006:  0.1680, 2007:  0.0356,
-    2008: -0.1826, 2009:  0.2929, 2010:  0.0722, 2011: -0.1319,
-    2012:  0.1535, 2013:  0.1141, 2014:  0.0786, 2015:  0.0419,
-    2016:  0.0510, 2017:  0.0528, 2018: -0.0705, 2019:  0.1555,
-    2020: -0.0338, 2021:  0.1166, 2022: -0.0700, 2023:  0.0831,
-    2024:  0.0775, 2025:  0.0759, 2026: -0.0073,
-}
-
-# 2026 solo tiene datos hasta marzo
-MESES_POR_ANO = {**{y: 12 for y in range(2004, 2026)}, 2026: 3}
-
-# Volatilidad anual histórica estimada por año (para dispersión realista)
-VOL_ANUAL_POR_ANO = {
-    2004: 0.055, 2005: 0.065, 2006: 0.060, 2007: 0.060,
-    2008: 0.105, 2009: 0.090, 2010: 0.060, 2011: 0.082,
-    2012: 0.065, 2013: 0.060, 2014: 0.055, 2015: 0.065,
-    2016: 0.055, 2017: 0.045, 2018: 0.070, 2019: 0.065,
-    2020: 0.085, 2021: 0.060, 2022: 0.075, 2023: 0.060,
-    2024: 0.055, 2025: 0.055, 2026: 0.055,
-}
 
 NOMBRES_MES = ["Ene", "Feb", "Mar", "Abr", "May", "Jun",
                "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
@@ -281,77 +253,29 @@ CSS = """
 """
 
 # ─────────────────────────────────────────────────────────────────
-# DATOS — descarga real o sintética
+# DATOS — carga desde CSV con rentabilidades mensuales reales
 # ─────────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(show_spinner=False)
 def cargar_datos():
-    """
-    Intenta Yahoo Finance con varios tickers.
-    Si no hay suficientes datos históricos, genera sintéticos
-    calibrados con las rentabilidades anuales reales.
-    """
-    datos_reales = False
-    nav = None
+    ruta = Path(__file__).parent / "olea_neutral_historico.csv"
+    df = pd.read_csv(ruta, sep=";", skiprows=2, names=["año", "mes", "rentabilidad"])
+    df["rentabilidad"] = pd.to_numeric(df["rentabilidad"], errors="coerce") / 100.0
 
-    try:
-        import yfinance as yf
-        for ticker in ["0P0000TRB3.F", "0P0000TRB3.L", "ES0118537002.SW"]:
-            try:
-                df = yf.download(ticker, start="2003-12-01", progress=False,
-                                 auto_adjust=True)
-                if df is not None and len(df) > 400:
-                    serie = df["Close"].resample("ME").last().dropna()
-                    if len(serie) > 150:
-                        nav = (serie / serie.iloc[0]) * 100.0
-                        datos_reales = True
-                        break
-            except Exception:
-                continue
-    except ImportError:
-        pass
-
-    if nav is None:
-        nav = _generar_nav_sintetico()
-
-    ret = nav.pct_change().dropna()
-    return nav, ret, datos_reales
-
-
-def _generar_nav_sintetico():
-    """
-    Genera serie mensual de VL sintética.
-    Método: para cada año, genera shocks normales y ajusta la media
-    logarítmica de forma que el producto de retornos mensuales case
-    exactamente con la rentabilidad anual real conocida.
-    """
-    rng = np.random.default_rng(seed=2004)
-
-    nav_valor = 100.0
-    # Punto de referencia: 31 dic 2003 = VL base 100
-    # Es necesario para que pct_change capture el retorno de enero 2004
     fechas = [pd.Timestamp(2003, 12, 31)]
-    navs = [100.0]
+    navs   = [100.0]
+    nav_val = 100.0
 
-    for ano, ret_anual in RETORNOS_ANUALES.items():
-        n = MESES_POR_ANO[ano]
-        vol_m = VOL_ANUAL_POR_ANO[ano] / np.sqrt(12)
+    for _, row in df.iterrows():
+        ano, mes, r = int(row["año"]), int(row["mes"]), row["rentabilidad"]
+        fecha = pd.Timestamp(ano, mes, 1) + MonthEnd(0)
+        nav_val *= (1.0 + r)
+        fechas.append(fecha)
+        navs.append(nav_val)
 
-        shocks = rng.normal(0.0, vol_m, n)
-
-        # El retorno proporcionado es siempre el total real del período
-        # (anual para años completos, acumulado del período para 2026 parcial)
-        log_ret_objetivo = np.log(1.0 + ret_anual)
-        mu_log = (log_ret_objetivo - shocks.sum()) / n
-        ret_m = np.exp(mu_log + shocks) - 1.0
-
-        for i, r in enumerate(ret_m):
-            fecha = pd.Timestamp(ano, i + 1, 1) + MonthEnd(0)
-            fechas.append(fecha)
-            nav_valor *= (1.0 + r)
-            navs.append(nav_valor)
-
-    return pd.Series(navs, index=pd.DatetimeIndex(fechas), name="NAV")
+    nav = pd.Series(navs, index=pd.DatetimeIndex(fechas), name="NAV")
+    ret = nav.pct_change().dropna()
+    return nav, ret
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -619,7 +543,7 @@ def fig_drawdown(nav):
 def fig_barras_objetivo(ret):
     """Barras anuales verdes/rojas vs línea del 5% TAE."""
     datos_ano = {}
-    for ano in RETORNOS_ANUALES:
+    for ano in sorted(ret.index.year.unique()):
         r = ret[ret.index.year == ano]
         if len(r) > 0:
             datos_ano[ano] = (1.0 + r).prod() - 1.0
@@ -819,14 +743,12 @@ def main():
 
     # ── Carga de datos ────────────────────────────────────────────
     with st.spinner("Cargando datos históricos del fondo…"):
-        nav, ret, datos_reales = cargar_datos()
+        nav, ret = cargar_datos()
 
-    if not datos_reales:
-        st.info(
-            "**Datos sintéticos** calibrados con rentabilidades anuales reales del fondo (2004-2026). "
-            "La distribución mensual es aleatoria con semilla fija — el total anual es exacto.",
-            icon="📊"
-        )
+    st.info(
+        "**Datos reales** — fuente: informes oficiales Olea Gestión.",
+        icon="📊"
+    )
 
     mg = calcular_metricas(nav)
 
@@ -933,9 +855,13 @@ def main():
     st.plotly_chart(fig_barras_objetivo(ret), use_container_width=True)
 
     # Mini-resumen estadístico del cumplimiento del objetivo
-    anos_con_dato = {a: v for a, v in RETORNOS_ANUALES.items() if MESES_POR_ANO[a] == 12}
-    n_total = len(anos_con_dato)
-    n_cumple = sum(1 for v in anos_con_dato.values() if v >= OBJETIVO_TAE)
+    anos_completos = {
+        ano: (1.0 + ret[ret.index.year == ano]).prod() - 1.0
+        for ano in ret.index.year.unique()
+        if len(ret[ret.index.year == ano]) == 12
+    }
+    n_total = len(anos_completos)
+    n_cumple = sum(1 for v in anos_completos.values() if v >= OBJETIVO_TAE)
     tae_hist = mg["tae"]
 
     col_a, col_b, col_c = st.columns(3)
@@ -961,11 +887,11 @@ def main():
 
     # ── Footer ────────────────────────────────────────────────────
     st.markdown("---")
-    fuente = "datos reales Yahoo Finance" if datos_reales else "datos sintéticos calibrados"
     n_m = mg["n_meses"]
     st.markdown(
         f'<div style="color:#333;font-family:\'Courier New\',monospace;font-size:10px;text-align:center">'
-        f'Olea Gestión &nbsp;·&nbsp; {fuente} &nbsp;·&nbsp; {n_m} meses de historia '
+        f'Olea Gestión &nbsp;·&nbsp; Datos reales — fuente: informes oficiales Olea Gestión'
+        f' &nbsp;·&nbsp; {n_m} meses de historia '
         f'({nav.index[0].strftime("%b %Y")} – {nav.index[-1].strftime("%b %Y")}) '
         f'&nbsp;·&nbsp; Actualizado {datetime.now().strftime("%d/%m/%Y %H:%M")}'
         f'</div>',
